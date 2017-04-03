@@ -24,6 +24,7 @@ import android.support.v7.app.AppCompatActivity;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
@@ -44,13 +45,18 @@ import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
 import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfig;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings;
 import com.google.firebase.storage.FirebaseStorage;
 import com.google.firebase.storage.StorageReference;
 import com.google.firebase.storage.UploadTask;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -58,11 +64,13 @@ public class MainActivity extends AppCompatActivity {
 
     public static final String ANONYMOUS = "anonymous";
     public static final int DEFAULT_MSG_LENGTH_LIMIT = 1000;
+    public static final String FRIENDLY_MSG_LENGTH_KEY = "friendly_message_length";
     private static final int RC_SIGN_IN = 1;
-    private static final int RC_PHOTO_PICKER =  2;
+    private static final int RC_PHOTO_PICKER = 2;
 
     private ListView mMessageListView;
-    private MessageAdapter mMessageAdapter;
+//    private MessageAdapter mMessageAdapter;
+    private FirebaseMessageAdapter mFirebaseMessageAdapter;
     private ProgressBar mProgressBar;
     private ImageButton mPhotoPickerButton;
     private EditText mMessageEditText;
@@ -77,6 +85,7 @@ public class MainActivity extends AppCompatActivity {
     private FirebaseAuth.AuthStateListener mAuthStateListener;
     private FirebaseStorage mFirebaseStorage;
     private StorageReference mChatPhotosStorageReference;
+    private FirebaseRemoteConfig mFirebaseRemoteConfig;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,6 +97,8 @@ public class MainActivity extends AppCompatActivity {
         mFirebaseDatabase = FirebaseDatabase.getInstance();
         mFirebaseAuth = FirebaseAuth.getInstance();
         mFirebaseStorage = FirebaseStorage.getInstance();
+        mFirebaseRemoteConfig = FirebaseRemoteConfig.getInstance();
+
         mMessagesDatabaseReference = mFirebaseDatabase.getReference().child("messages");
         mChatPhotosStorageReference = mFirebaseStorage.getReference().child("chat_photos");
 
@@ -99,9 +110,16 @@ public class MainActivity extends AppCompatActivity {
         mSendButton = (Button) findViewById(R.id.sendButton);
 
         // Initialize message ListView and its adapter
-        List<FriendlyMessage> friendlyMessages = new ArrayList<>();
-        mMessageAdapter = new MessageAdapter(this, R.layout.item_message, friendlyMessages);
-        mMessageListView.setAdapter(mMessageAdapter);
+
+//        DatabaseReference ref = FirebaseDatabase.getInstance().getReference();
+
+        mFirebaseMessageAdapter = new FirebaseMessageAdapter(this, FriendlyMessage.class, R.layout.item_message, mMessagesDatabaseReference);
+        mMessageListView.setAdapter(mFirebaseMessageAdapter);
+
+
+//        List<FriendlyMessage> friendlyMessages = new ArrayList<>();
+//        mMessageAdapter = new MessageAdapter(this, R.layout.item_message, friendlyMessages);
+//        mMessageListView.setAdapter(mMessageAdapter);
 
         // Initialize progress bar
         mProgressBar.setVisibility(ProgressBar.INVISIBLE);
@@ -176,6 +194,17 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         };
+
+        FirebaseRemoteConfigSettings configSettings = new FirebaseRemoteConfigSettings.Builder()
+            .setDeveloperModeEnabled(BuildConfig.DEBUG)
+            .build();
+        mFirebaseRemoteConfig.setConfigSettings(configSettings);
+
+        Map<String, Object> defaultConfigMap = new HashMap<>();
+        defaultConfigMap.put(FRIENDLY_MSG_LENGTH_KEY, DEFAULT_MSG_LENGTH_LIMIT);
+
+        mFirebaseRemoteConfig.setDefaults(defaultConfigMap);
+        fetchConfig();
     }
 
     @Override
@@ -189,12 +218,12 @@ public class MainActivity extends AppCompatActivity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
-        if(requestCode == RC_SIGN_IN){
-            if(resultCode == RESULT_CANCELED){
+        if (requestCode == RC_SIGN_IN) {
+            if (resultCode == RESULT_CANCELED) {
                 //exit the activity when back pressed
                 finish();
             }
-        } else if(requestCode == RC_PHOTO_PICKER && resultCode == RESULT_OK){
+        } else if (requestCode == RC_PHOTO_PICKER && resultCode == RESULT_OK) {
             Uri selectedImageUri = data.getData();
             StorageReference photoRef = mChatPhotosStorageReference.child(selectedImageUri.getLastPathSegment());
 
@@ -228,17 +257,17 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        if(mAuthStateListener!=null) {
+        if (mAuthStateListener != null) {
             mFirebaseAuth.removeAuthStateListener(mAuthStateListener);
         }
         detachDatabaseReadListener();
-        mMessageAdapter.clear();
+        mFirebaseMessageAdapter.cleanup();
     }
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
 
-        switch (item.getItemId()){
+        switch (item.getItemId()) {
             case R.id.sign_out_menu:
                 //sign out
                 AuthUI.getInstance().signOut(this);
@@ -255,17 +284,17 @@ public class MainActivity extends AppCompatActivity {
 
     public void onSignedOutCleanup() {
         mUsername = ANONYMOUS;
-        mMessageAdapter.clear();
+        mFirebaseMessageAdapter.cleanup();
         detachDatabaseReadListener();
     }
 
     private void attachDatabaseReadListener() {
-        if(mChildEventListener == null) {
+        if (mChildEventListener == null) {
             mChildEventListener = new ChildEventListener() {
                 @Override
                 public void onChildAdded(DataSnapshot dataSnapshot, String s) {
-                    FriendlyMessage friendlyMessage = dataSnapshot.getValue(FriendlyMessage.class);
-                    mMessageAdapter.add(friendlyMessage);
+//                    FriendlyMessage friendlyMessage = dataSnapshot.getValue(FriendlyMessage.class);
+//                    mFirebaseMessageAdapter.add(friendlyMessage);
                 }
 
                 @Override
@@ -289,10 +318,40 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void detachDatabaseReadListener(){
-        if(mChildEventListener!=null) {
+    private void detachDatabaseReadListener() {
+        if (mChildEventListener != null) {
             mMessagesDatabaseReference.removeEventListener(mChildEventListener);
             mChildEventListener = null;
         }
+    }
+
+    private void fetchConfig(){
+        long cacheExpiration = 3600;
+
+        if(mFirebaseRemoteConfig.getInfo().getConfigSettings().isDeveloperModeEnabled()){
+            cacheExpiration = 0;
+        }
+
+        mFirebaseRemoteConfig.fetch(cacheExpiration)
+            .addOnSuccessListener(new OnSuccessListener<Void>() {
+                @Override
+                public void onSuccess(Void aVoid) {
+                    mFirebaseRemoteConfig.activateFetched();
+                    applyRetrievedLengthLimit();
+                }
+            })
+            .addOnFailureListener(new OnFailureListener() {
+                @Override
+                public void onFailure(@NonNull Exception e) {
+                    Log.e("Friendly chat", "****** error fetching config " + e);
+                    applyRetrievedLengthLimit();
+                }
+            });
+    }
+
+    private void applyRetrievedLengthLimit(){
+        Long friendly_msg_length = mFirebaseRemoteConfig.getLong(FRIENDLY_MSG_LENGTH_KEY);
+        mMessageEditText.setFilters(new InputFilter[]{new InputFilter.LengthFilter(friendly_msg_length.intValue())});
+        Log.d("Friendly chat", "****** msg length : "+ friendly_msg_length);
     }
 }
